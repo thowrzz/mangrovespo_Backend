@@ -1,0 +1,16 @@
+[Unit]
+Description=MangroveSpot Gunicorn Daemon
+After=network.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/mangrovespot_backend
+ExecStart=/var/www/mangrovespot_backend/venv/bin/gunicorn \
+    --workers 3 \
+    --bind unix:/var/www/mangrovespot_backend/gunicorn.sock \
+    config.wsgi:application
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
