@@ -41,10 +41,9 @@ class Activity(TimeStampedModel):
     def __str__(self):
         return self.name
 
-
 class TimeSlot(TimeStampedModel):
     activity = models.ForeignKey(Activity, on_delete=models.CASCADE, related_name='slots')
-    label = models.CharField(max_length=100)         # "6:30 AM Sunrise"
+    label = models.CharField(max_length=100)
     time = models.TimeField()
     capacity = models.PositiveIntegerField(default=10)
     is_active = models.BooleanField(default=True)
@@ -59,16 +58,14 @@ class TimeSlot(TimeStampedModel):
         """Returns remaining slots for a given date."""
         from apps.bookings.models import BookingItem
         from django.utils import timezone
+        from django.db.models import Q
+
         booked = BookingItem.objects.filter(
             slot=self,
             visit_date=date,
-            booking__status__in=['pending', 'confirmed'],
-            slot_hold_expires__gt=timezone.now()
+        ).filter(
+            Q(booking__status='confirmed') |
+            Q(booking__status='pending', slot_hold_expires__gt=timezone.now())
         ).count()
-        confirmed = BookingItem.objects.filter(
-            slot=self,
-            visit_date=date,
-            booking__status='confirmed'
-        ).count()
-        total = max(booked, confirmed)
-        return max(0, self.capacity - total)
+
+        return max(0, self.capacity - booked)

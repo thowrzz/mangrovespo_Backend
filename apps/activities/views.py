@@ -120,3 +120,26 @@ class AdminSlotDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = TimeSlotSerializer
     queryset = TimeSlot.objects.all()
+
+    def perform_destroy(self, instance):
+        from django.db.models import ProtectedError
+        try:
+            instance.delete()
+        except ProtectedError:
+            # Slot has bookings — soft delete by deactivating
+            instance.is_active = False
+            instance.save()
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        from django.db.models import ProtectedError
+        try:
+            instance.delete()
+            return Response(status=204)
+        except ProtectedError:
+            instance.is_active = False
+            instance.save()
+            return Response(
+                {"detail": "Slot has existing bookings and was deactivated instead of deleted."},
+                status=200
+            )

@@ -35,9 +35,14 @@ class ActivityDetailSerializer(serializers.ModelSerializer):
 
 
 class ActivityAdminSerializer(serializers.ModelSerializer):
-    """Full serializer for admin CRUD — all fields exposed."""
-    slots = TimeSlotSerializer(many=True, read_only=True)
-
     class Meta:
         model = Activity
         fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at', 'is_deleted']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Make these optional for PATCH
+        for field in ['description', 'category', 'duration']:
+            self.fields[field].required = False
+            self.fields[field].allow_blank = True
