@@ -1,0 +1,4 @@
+user
+Mangrove@2026
+
+.\venv\Scripts\Activate.ps1

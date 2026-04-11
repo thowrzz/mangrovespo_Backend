@@ -1,0 +1,12 @@
+[Unit]
+Description=MangroveSpot Celery Worker
+After=network.target
+
+[Service]
+User=www-data
+WorkingDirectory=/var/www/mangrovespot_backend
+ExecStart=/var/www/mangrovespot_backend/venv/bin/celery -A config worker -l info
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
