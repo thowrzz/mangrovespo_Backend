@@ -265,7 +265,11 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
 # ── Middleware ────────────────────────────────────────────────────
 MIDDLEWARE = [
+<<<<<<< Updated upstream
     'corsheaders.middleware.CorsMiddleware',          # must be first
+=======
+    'corsheaders.middleware.CorsMiddleware',         
+>>>>>>> Stashed changes
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
