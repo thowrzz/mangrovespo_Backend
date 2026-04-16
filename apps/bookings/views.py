@@ -1,17 +1,15 @@
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status, generics, filters
 from rest_framework.views import APIView
-from rest_framework.authentication import TokenAuthentication
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
-
+from customer_auth.authentication import CustomerJWTAuthentication
 from .models import Booking, BookingItem
 from .serializers import BookingInitiateSerializer, BookingSerializer
-
-
-# Helpers
+# ── Helpers ───────────────────────────────────────────────────────
 
 def _safe_str(value, default='0'):
     if value is None:
@@ -21,7 +19,7 @@ def _safe_str(value, default='0'):
 
 
 def _serialize_booking(b):
-    first_item = b.items.first()
+    first_item  = b.items.first()
     amount_paid = (
         getattr(b, 'amount_paid', None)
         or getattr(b, 'paid_amount', None)
@@ -31,7 +29,8 @@ def _serialize_booking(b):
     for item in b.items.all():
         activity = getattr(item, 'activity', None)
         price = (
-            getattr(item, 'price', None)
+            getattr(item, 'price_snapshot', None)
+            or getattr(item, 'price', None)
             or getattr(item, 'subtotal', None)
             or getattr(item, 'total_price', None)
         )
@@ -40,7 +39,9 @@ def _serialize_booking(b):
             'activity_image': (activity.image_url or '') if activity else '',
             'num_adults':     getattr(item, 'num_adults',   0),
             'num_children':   getattr(item, 'num_children', 0),
-            'price':          _safe_str(price),
+            'price_snapshot': _safe_str(price),
+            'visit_date':     str(item.visit_date)   if item.visit_date   else None,
+            'arrival_time':   str(item.arrival_time) if item.arrival_time else None,
         })
     return {
         'reference':      b.reference,
@@ -51,15 +52,19 @@ def _serialize_booking(b):
         'grand_total':    _safe_str(getattr(b, 'grand_total', None)),
         'amount_paid':    _safe_str(amount_paid),
         'balance_due':    _safe_str(getattr(b, 'balance_due', None)),
+        'payment_mode':   getattr(b, 'payment_mode', 'half'),
         'customer_name':  b.customer_name,
         'customer_email': b.customer_email,
+        'customer_phone': b.customer_phone,
         'items':          items_data,
     }
 
 
-# PUBLIC
+# ── PUBLIC ────────────────────────────────────────────────────────
+
 
 @api_view(['POST'])
+@authentication_classes([])          # skip all auth — truly public
 @permission_classes([AllowAny])
 def initiate_booking(request):
     serializer = BookingInitiateSerializer(data=request.data)
@@ -82,6 +87,7 @@ def initiate_booking(request):
 
 
 @api_view(['GET'])
+@authentication_classes([])          # skip all auth — truly public
 @permission_classes([AllowAny])
 def lookup_booking(request):
     email     = request.query_params.get('email')
@@ -92,24 +98,24 @@ def lookup_booking(request):
         Booking,
         customer_email__iexact=email,
         reference__iexact=reference,
-        status__in=['confirmed', 'completed', 'cancelled']
+        status__in=['confirmed', 'completed', 'cancelled'],
     )
     return Response(BookingSerializer(booking).data)
 
 
-# CUSTOMER: My Bookings
+# ── CUSTOMER ──────────────────────────────────────────────────────
+
 
 class MyBookingsView(APIView):
-    authentication_classes = [TokenAuthentication]
+    # CustomerJWTAuthentication: handles "Authorization: Bearer <custom_hmac_jwt>"
+    # This is the ONLY correct authenticator for customer routes.
+    authentication_classes = [CustomerJWTAuthentication]
     permission_classes     = [IsAuthenticated]
 
     def get(self, request):
-        email = request.user.email
+        email = getattr(request.user, 'email', None)
         if not email:
-            return Response(
-                {'detail': 'User account has no email address.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'detail': 'No email on token.'}, status=400)
         bookings = (
             Booking.objects
             .filter(customer_email__iexact=email)
@@ -120,14 +126,16 @@ class MyBookingsView(APIView):
         return Response([_serialize_booking(b) for b in bookings])
 
 
-# ADMIN
+# ── ADMIN ─────────────────────────────────────────────────────────
+
 
 class AdminBookingListView(generics.ListAPIView):
-    permission_classes = [IsAuthenticated]
-    serializer_class   = BookingSerializer
-    filter_backends    = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields   = ['status', 'items__visit_date', 'items__activity']
-    search_fields      = ['customer_name', 'customer_phone', 'reference']
+    authentication_classes = [JWTAuthentication]   # admin SimpleJWT only
+    permission_classes     = [IsAuthenticated]
+    serializer_class       = BookingSerializer
+    filter_backends        = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields       = ['status', 'items__visit_date', 'items__activity']
+    search_fields          = ['customer_name', 'customer_phone', 'reference']
 
     def get_queryset(self):
         return (
@@ -138,20 +146,23 @@ class AdminBookingListView(generics.ListAPIView):
 
 
 class AdminBookingDetailView(generics.RetrieveAPIView):
-    permission_classes = [IsAuthenticated]
-    serializer_class   = BookingSerializer
-    queryset           = Booking.objects.prefetch_related('items__activity', 'items__slot')
-    lookup_field       = 'reference'
+    authentication_classes = [JWTAuthentication]
+    permission_classes     = [IsAuthenticated]
+    serializer_class       = BookingSerializer
+    queryset               = Booking.objects.prefetch_related('items__activity', 'items__slot')
+    lookup_field           = 'reference'
 
 
 class AdminBookingDetailView_ById(generics.RetrieveAPIView):
-    permission_classes = [IsAuthenticated]
-    serializer_class   = BookingSerializer
-    queryset           = Booking.objects.prefetch_related('items__activity', 'items__slot')
-    lookup_field       = 'pk'
+    authentication_classes = [JWTAuthentication]
+    permission_classes     = [IsAuthenticated]
+    serializer_class       = BookingSerializer
+    queryset               = Booking.objects.prefetch_related('items__activity', 'items__slot')
+    lookup_field           = 'pk'
 
 
 @api_view(['POST'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def cancel_booking(request, reference):
     booking = get_object_or_404(Booking, reference=reference, status='confirmed')
@@ -163,6 +174,7 @@ def cancel_booking(request, reference):
 
 
 @api_view(['POST'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def complete_booking(request, reference):
     booking = get_object_or_404(Booking, reference=reference, status='confirmed')
@@ -172,18 +184,16 @@ def complete_booking(request, reference):
 
 
 @api_view(['PATCH'])
+@authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def update_booking_status(request, pk):
-    booking = get_object_or_404(Booking, pk=pk)
-    new_status     = request.data.get('status')
+    booking    = get_object_or_404(Booking, pk=pk)
+    new_status = request.data.get('status')
     valid_statuses = ['pending', 'confirmed', 'completed', 'cancelled']
     if not new_status:
         return Response({'error': 'status is required'}, status=400)
     if new_status not in valid_statuses:
-        return Response(
-            {'error': f'Invalid status. Choose from: {valid_statuses}'},
-            status=400
-        )
+        return Response({'error': f'Invalid status. Choose from: {valid_statuses}'}, status=400)
     old_status     = booking.status
     booking.status = new_status
     booking.save()
