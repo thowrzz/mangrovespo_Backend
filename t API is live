@@ -1,0 +1,11 @@
+[0;1;32m●[0m mangrovespot-celery.service - MangroveSpot Celery Worker
+     Loaded: loaded (/etc/systemd/system/mangrovespot-celery.service; enabled; vendor preset: enabled)
+     Active: [0;1;32mactive (running)[0m since Sun 2026-04-12 00:14:24 IST; 16ms ago
+   Main PID: 892889 (celery)
+      Tasks: 1 (limit: 9474)
+     Memory: 1.4M
+        CPU: 6ms
+     CGroup: /system.slice/mangrovespot-celery.service
+             └─892889 /var/www/mangrovespot/backend/venv/bin/python3 /var/www/mangrovespot/backend/venv/bin/celery -A config worker --loglevel=info --logfile=/var/log/mangrovespot/celery.log
+
+Apr 12 00:14:24 srv1172539 systemd[1]: Started MangroveSpot Celery Worker.

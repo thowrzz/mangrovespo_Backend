@@ -46,7 +46,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='booking',
             name='razorpay_payment_id',
-            field=models.CharField(blank=True, db_index=True, max_length=100, null=True, unique=True),
+            field=models.CharField(blank=True, db_index=True, max_length=100, null=True),
         ),
         migrations.AlterField(
             model_name='booking',
@@ -54,3 +54,4 @@ class Migration(migrations.Migration):
             field=models.CharField(choices=[('pending', 'Pending'), ('confirmed', 'Confirmed'), ('completed', 'Completed'), ('cancelled', 'Cancelled'), ('expired', 'Expired')], db_index=True, default='pending', max_length=20),
         ),
     ]
+
