@@ -185,9 +185,9 @@
 
 #     # Always 200 — Razorpay retries indefinitely on non-2xx
 #     return Response({'status': 'ok'})
-
 import hashlib
 import hmac
+import json
 import logging
 
 import razorpay
@@ -208,38 +208,53 @@ from apps.bookings.models import Booking
 
 logger = logging.getLogger(__name__)
 
-# ── Razorpay client (singleton) ───────────────────────────────────
+
 def _rz_client():
     return razorpay.Client(
         auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
     )
 
 
-# ── 1. Payment Verification (called by frontend after Razorpay modal) ──
+def _fire_emails(booking_id: int):
+    """
+    Queues both customer + owner emails via Celery.
+    Falls back to direct call if Celery is unavailable.
+    Never raises — a failed email must not roll back the payment confirmation.
+    """
+    try:
+        from apps.notifications.tasks import send_confirmation_emails
+        send_confirmation_emails.delay(booking_id)
+        logger.info("Queued confirmation emails for booking %s", booking_id)
+    except Exception as exc:
+        logger.warning(
+            "Could not queue confirmation emails for booking %s: %s",
+            booking_id, exc
+        )
+
+
+# ── 1. verify_payment ─────────────────────────────────────────────
 @api_view(["POST"])
 @authentication_classes([])
 @permission_classes([AllowAny])
 def verify_payment(request):
     """
-    Called immediately after Razorpay checkout succeeds on the frontend.
-    Verifies HMAC signature, checks amount, marks booking confirmed.
-    Returns booking_reference so the frontend can show the success screen.
+    Called by frontend immediately after Razorpay modal success.
+    On success: booking is confirmed + both emails fire instantly.
     """
-    data = request.data
-    razorpay_order_id   = data.get("razorpay_order_id", "").strip()
+    data                = request.data
+    razorpay_order_id   = data.get("razorpay_order_id",   "").strip()
     razorpay_payment_id = data.get("razorpay_payment_id", "").strip()
-    razorpay_signature  = data.get("razorpay_signature", "").strip()
+    razorpay_signature  = data.get("razorpay_signature",  "").strip()
 
-    # ── Basic field validation ────────────────────────────────────
     if not all([razorpay_order_id, razorpay_payment_id, razorpay_signature]):
         return Response(
             {"error": "razorpay_order_id, razorpay_payment_id and razorpay_signature are required"},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # ── Signature verification (HMAC-SHA256) ─────────────────────
-    body      = f"{razorpay_order_id}|{razorpay_payment_id}"
-    expected  = hmac.new(
+    # ── HMAC-SHA256 signature check ───────────────────────────────
+    body     = f"{razorpay_order_id}|{razorpay_payment_id}"
+    expected = hmac.new(
         settings.RAZORPAY_KEY_SECRET.encode(),
         body.encode(),
         hashlib.sha256,
@@ -263,23 +278,23 @@ def verify_payment(request):
             status=status.HTTP_404_NOT_FOUND,
         )
 
-    # ── Idempotency: already confirmed? ──────────────────────────
+    # ── Already confirmed (webhook beat us) — just return success ─
     if booking.status == "confirmed":
-        return Response(
-            {
-                "success":           True,
-                "already_confirmed": True,
-                "booking_reference": booking.reference,
-                "amount_paid":       str(booking.amount_paid),
-                "balance_due":       str(booking.balance_due),
-                "customer_name":     booking.customer_name,
-            }
-        )
+        return Response({
+            "success":           True,
+            "already_confirmed": True,
+            "booking_reference": booking.reference,
+            "amount_paid":       str(booking.amount_paid),
+            "balance_due":       str(booking.balance_due),
+            "grand_total":       str(booking.grand_total),
+            "customer_name":     booking.customer_name,
+            "customer_email":    booking.customer_email,
+        })
 
-    # ── Verify amount with Razorpay API ──────────────────────────
-    # Prevents someone creating a ₹1 order and verifying against a ₹5000 booking
+    # ── Amount verification via Razorpay API ──────────────────────
+    # Prevents someone creating a ₹1 order against a ₹5000 booking
     try:
-        rz_order = _rz_client().order.fetch(razorpay_order_id)
+        rz_order        = _rz_client().order.fetch(razorpay_order_id)
         rz_amount_paise = int(rz_order.get("amount", 0))
         expected_paise  = int(booking.amount_paid * 100)
 
@@ -301,11 +316,8 @@ def verify_payment(request):
 
     # ── Confirm booking atomically ────────────────────────────────
     with transaction.atomic():
-        # Re-fetch inside atomic to prevent race
         booking.refresh_from_db()
-        if booking.status == "confirmed":          # double-check after lock
-            pass
-        else:
+        if booking.status != "confirmed":
             booking.razorpay_payment_id = razorpay_payment_id
             booking.status              = "confirmed"
             booking.payment_verified_at = timezone.now()
@@ -314,50 +326,38 @@ def verify_payment(request):
                 "status",
                 "payment_verified_at",
             ])
+            logger.info("Booking %s confirmed via verify_payment", booking.reference)
 
-    # ── Trigger confirmation email (async) ───────────────────────
-    try:
-        from apps.notifications.tasks import send_booking_confirmation_email
-        send_booking_confirmation_email.delay(booking.id)
-    except Exception as exc:
-        logger.warning("Could not queue confirmation email: %s", exc)
+    # ── Fire both emails (customer + owner) ───────────────────────
+    _fire_emails(booking.id)
 
-    return Response(
-        {
-            "success":           True,
-            "booking_reference": booking.reference,
-            "amount_paid":       str(booking.amount_paid),
-            "balance_due":       str(booking.balance_due),
-            "grand_total":       str(booking.grand_total),
-            "customer_name":     booking.customer_name,
-            "customer_email":    booking.customer_email,
-        },
-        status=status.HTTP_200_OK,
-    )
+    return Response({
+        "success":           True,
+        "booking_reference": booking.reference,
+        "amount_paid":       str(booking.amount_paid),
+        "balance_due":       str(booking.balance_due),
+        "grand_total":       str(booking.grand_total),
+        "customer_name":     booking.customer_name,
+        "customer_email":    booking.customer_email,
+    }, status=status.HTTP_200_OK)
 
 
-# ── 2. Razorpay Webhook (server-to-server, fallback) ─────────────
+# ── 2. razorpay_webhook ───────────────────────────────────────────
 @csrf_exempt
 @api_view(["POST"])
 @authentication_classes([])
 @permission_classes([AllowAny])
 def razorpay_webhook(request):
     """
-    Razorpay calls this endpoint directly on payment.captured / payment.failed.
-    This is the RELIABLE confirmation path — it fires even if the user closes
-    the browser before the frontend handler completes.
-
-    Configure in Razorpay Dashboard → Settings → Webhooks:
-        URL    : https://your-domain.com/api/payments/webhook/
-        Events : payment.captured, payment.failed
-        Secret : set RAZORPAY_WEBHOOK_SECRET in .env
+    Server-to-server fallback from Razorpay.
+    Fires even if the user closed the browser before verify_payment ran.
+    Must always return 200 — Razorpay retries indefinitely on non-2xx.
     """
     webhook_secret = getattr(settings, "RAZORPAY_WEBHOOK_SECRET", "")
     if not webhook_secret:
         logger.error("RAZORPAY_WEBHOOK_SECRET is not configured")
         return Response(status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    # ── Verify webhook signature ──────────────────────────────────
     received_sig = request.headers.get("X-Razorpay-Signature", "")
     body_bytes   = request.body
 
@@ -369,13 +369,8 @@ def razorpay_webhook(request):
 
     if not hmac.compare_digest(expected_sig, received_sig):
         logger.warning("Invalid webhook signature received")
-        return Response(
-            {"error": "Invalid signature"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response({"error": "Invalid signature"}, status=status.HTTP_400_BAD_REQUEST)
 
-    # ── Parse event ───────────────────────────────────────────────
-    import json
     try:
         payload    = json.loads(body_bytes)
         event      = payload.get("event", "")
@@ -388,7 +383,7 @@ def razorpay_webhook(request):
     payment_id = rz_payment.get("id", "")
 
     if not order_id:
-        return Response(status=status.HTTP_200_OK)   # nothing we can do
+        return Response(status=status.HTTP_200_OK)
 
     try:
         booking = Booking.objects.select_for_update().get(
@@ -396,7 +391,7 @@ def razorpay_webhook(request):
         )
     except Booking.DoesNotExist:
         logger.warning("Webhook: no booking found for order %s", order_id)
-        return Response(status=status.HTTP_200_OK)   # 200 so Razorpay doesn't retry
+        return Response(status=status.HTTP_200_OK)
 
     with transaction.atomic():
         booking.refresh_from_db()
@@ -413,16 +408,16 @@ def razorpay_webhook(request):
                 ])
                 logger.info("Webhook confirmed booking %s", booking.reference)
 
-                try:
-                    from apps.notifications.tasks import send_booking_confirmation_email
-                    send_booking_confirmation_email.delay(booking.id)
-                except Exception as exc:
-                    logger.warning("Webhook: could not queue email: %s", exc)
+                # Fire both emails — same as verify_payment path
+                _fire_emails(booking.id)
 
         elif event == "payment.failed":
             if booking.status == "pending":
                 booking.status = "expired"
                 booking.save(update_fields=["status"])
-                logger.info("Webhook expired booking %s after payment failure", booking.reference)
+                logger.info(
+                    "Webhook expired booking %s after payment failure",
+                    booking.reference,
+                )
 
     return Response({"status": "ok"}, status=status.HTTP_200_OK)
