@@ -421,6 +421,7 @@ cloudinary.config(
     secure     = True,
 )
 
+RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '')
 
 # ── App Settings ──────────────────────────────────────────────────
 ADMIN_EMAIL              = config('ADMIN_EMAIL', default='mangrovespot.care@gmail.com')
