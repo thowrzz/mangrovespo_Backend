@@ -142,308 +142,539 @@
 
 
 
+"""
+apps/notifications/tasks.py
 
+All email tasks.  Key reliability settings on every task:
+  bind=True               — access self.request.retries for back-off
+  acks_late=True          — task stays in queue until it SUCCEEDS
+                            (if worker crashes mid-send, it requeues)
+  reject_on_worker_lost=True — requeue if worker process is killed
+  max_retries=5           — give up after 5 failures (don't loop forever)
+  Exponential back-off    — 10s, 20s, 40s, 80s, 160s between retries
+                            covers Gmail rate limits and SMTP blips
+
+The main task is send_confirmation_emails() — call this after payment.
+It sends BOTH the customer confirmation AND the owner alert in one shot,
+using a single DB query for both, so there's no extra DB overhead.
+"""
+
+import logging
 from celery import shared_task
 from django.conf import settings
-import logging
+from django.core.mail import EmailMultiAlternatives
 
 logger = logging.getLogger(__name__)
 
 
-def _send_email(to_email: str, subject: str, html_content: str):
-    try:
-        from django.core.mail import send_mail
-        send_mail(
-            subject=subject,
-            message="Please view this email in an HTML-compatible client.",
-            from_email=settings.EMAIL_HOST_USER,
-            recipient_list=[to_email],
-            html_message=html_content,
-            fail_silently=False,
-        )
-    except Exception as e:
-        logger.error("Email send error: %s", e)
+# ── Internal helpers ──────────────────────────────────────────────
 
-
-def _time_label(item) -> str:
+def _slot_label(item) -> str:
     if item.slot:
         return item.slot.label
     if item.arrival_time:
-        return item.arrival_time.strftime('%I:%M %p')
-    return '—'
+        return item.arrival_time.strftime("%I:%M %p")
+    return "—"
 
 
-def _persons_label(item) -> str:
-    label = f"{item.num_adults}A"
+def _guests_label(item) -> str:
+    label = f"{item.num_adults} Adult{'s' if item.num_adults != 1 else ''}"
     if item.num_children:
-        label += f" + {item.num_children}C"
+        label += f", {item.num_children} Child{'ren' if item.num_children != 1 else ''}"
     return label
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# NEW: single task that fires BOTH customer + owner emails after payment.
-# Call this everywhere instead of calling the two tasks separately.
-#
-# Usage:
-#   send_confirmation_emails.delay(booking_id)   ← Celery (preferred)
-#   send_confirmation_emails(booking_id)          ← direct call (fallback)
-# ─────────────────────────────────────────────────────────────────────────────
-@shared_task
-def send_confirmation_emails(booking_id: int):
+def _send(to: str, subject: str, html: str, from_label: str = "MangroveSpot Adventures"):
     """
-    Fires immediately after payment is confirmed.
-    Sends:
-      1. Customer confirmation (booking reference, payment split, venue info)
-      2. Owner new-booking alert (customer details, admin link)
-    Both emails use the same DB fetch to keep it to one query.
+    Send one email. Raises on failure so the Celery retry kicks in.
+    Never silently swallows errors.
+    """
+    msg = EmailMultiAlternatives(
+        subject    = subject,
+        body       = _strip_tags(html),
+        from_email = f"{from_label} <{settings.DEFAULT_FROM_EMAIL}>",
+        to         = [to],
+        reply_to   = [getattr(settings, "ADMIN_EMAIL", settings.DEFAULT_FROM_EMAIL)],
+    )
+    msg.attach_alternative(html, "text/html")
+    msg.send(fail_silently=False)   # raises smtplib.SMTPException on failure
+
+
+def _strip_tags(html: str) -> str:
+    """Minimal HTML→plain-text for the text/plain part."""
+    import re
+    return re.sub(r"<[^>]+>", " ", html).strip()
+
+
+# ─────────────────────────────────────────────────────────────────
+# MAIN TASK: send_confirmation_emails
+# ─────────────────────────────────────────────────────────────────
+
+@shared_task(
+    bind                  = True,
+    acks_late             = True,           # don't ack until task succeeds
+    reject_on_worker_lost = True,           # requeue if worker dies
+    max_retries           = 5,
+    name                  = "notifications.send_confirmation_emails",
+)
+def send_confirmation_emails(self, booking_id: int):
+    """
+    Sends two emails after a confirmed payment:
+      1. Customer confirmation (reference, payment split, venue info)
+      2. Owner/admin new-booking alert
+
+    Both use one DB fetch. If SMTP fails, retries up to 5 times
+    with exponential back-off (10s → 20s → 40s → 80s → 160s).
+
+    Called from payments/views.py via transaction.on_commit() so
+    it only runs after booking.status = 'confirmed' is committed.
     """
     from apps.bookings.models import Booking
 
+    # ── Fetch booking ─────────────────────────────────────────────
     try:
         booking = Booking.objects.prefetch_related(
-            'items__activity', 'items__slot'
-        ).get(id=booking_id)
+            "items__activity", "items__slot"
+        ).get(pk=booking_id)
     except Booking.DoesNotExist:
-        logger.error("send_confirmation_emails: booking %s not found", booking_id)
+        # Booking was deleted — nothing to send, don't retry
+        logger.error(
+            "send_confirmation_emails: booking %s not found — aborting",
+            booking_id,
+        )
         return
 
-    # ── Build activity rows (shared by both emails) ───────────────
-    customer_rows = ""
-    owner_rows    = ""
-    for item in booking.items.all():
-        name  = item.activity.name
-        date  = str(item.visit_date)
-        time  = _time_label(item)
-        pax   = _persons_label(item)
-        price = f"₹{float(item.price_snapshot):,.0f}"
+    # ── Guard: only email confirmed bookings ──────────────────────
+    if booking.status not in ("confirmed", "completed"):
+        logger.warning(
+            "send_confirmation_emails: booking %s status='%s' — "
+            "expected confirmed, skipping",
+            booking.reference, booking.status,
+        )
+        return
 
-        customer_rows += f"""
+    # ── Build shared activity rows ────────────────────────────────
+    items        = list(booking.items.select_related("activity", "slot").all())
+    grand_total  = float(booking.grand_total)
+    amount_paid  = float(booking.amount_paid)
+    balance_due  = float(booking.balance_due)
+    frontend_url = getattr(settings, "FRONTEND_URL", "https://mangrovespot.in")
+    admin_email  = getattr(settings, "ADMIN_EMAIL", settings.DEFAULT_FROM_EMAIL)
+
+    table_rows_html = ""
+    for item in items:
+        table_rows_html += f"""
         <tr>
-          <td style="padding:8px;border:1px solid #ddd">{name}</td>
-          <td style="padding:8px;border:1px solid #ddd">{date}</td>
-          <td style="padding:8px;border:1px solid #ddd">{time}</td>
-          <td style="padding:8px;border:1px solid #ddd">{pax}</td>
-          <td style="padding:8px;border:1px solid #ddd;text-align:right">{price}</td>
+          <td style="padding:9px 12px;border-bottom:1px solid #f0f0f0;">{item.activity.name}</td>
+          <td style="padding:9px 12px;border-bottom:1px solid #f0f0f0;">{item.visit_date}</td>
+          <td style="padding:9px 12px;border-bottom:1px solid #f0f0f0;">{_slot_label(item)}</td>
+          <td style="padding:9px 12px;border-bottom:1px solid #f0f0f0;">{_guests_label(item)}</td>
+          <td style="padding:9px 12px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600;">
+            ₹{float(item.price_snapshot):,.0f}
+          </td>
         </tr>"""
-
-        owner_rows += f"""
-        <tr>
-          <td style="padding:6px;border:1px solid #ddd">{name}</td>
-          <td style="padding:6px;border:1px solid #ddd">{date}</td>
-          <td style="padding:6px;border:1px solid #ddd">{time}</td>
-          <td style="padding:6px;border:1px solid #ddd">{pax}</td>
-          <td style="padding:6px;border:1px solid #ddd;text-align:right">{price}</td>
-        </tr>"""
-
-    grand_total = float(booking.grand_total)
-    amount_paid = float(booking.amount_paid)
-    balance_due = float(booking.balance_due)
 
     # ── 1. Customer confirmation email ────────────────────────────
-    customer_html = f"""
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:24px;">
-      <h2 style="color:#2d7a4f;margin-bottom:4px;">🌿 Booking Confirmed — MangroveSpot</h2>
-      <p style="color:#888;font-size:13px;margin-top:0;">Paravur, Kollam, Kerala</p>
+    customer_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Booking Confirmed — {booking.reference}</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f7f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+<div style="max-width:600px;margin:24px auto;padding:0 16px;">
+<div style="background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08);">
 
-      <p>Hi <strong>{booking.customer_name}</strong>,</p>
-      <p>Your booking is confirmed! Reference:
-        <strong style="color:#2d7a4f;">{booking.reference}</strong>
-      </p>
+  <!-- Header -->
+  <div style="background:#16a34a;padding:32px;text-align:center;">
+    <div style="font-size:40px;margin-bottom:12px;">🌿</div>
+    <h1 style="color:#fff;font-size:22px;font-weight:700;margin:0 0 6px;">Booking Confirmed!</h1>
+    <p style="color:rgba(255,255,255,0.85);font-size:14px;margin:0;">MangroveSpot Adventures · Paravur, Kerala</p>
+  </div>
 
-      <table style="border-collapse:collapse;width:100%;margin:16px 0;">
-        <tr style="background:#2d7a4f;color:white;">
-          <th style="padding:8px;text-align:left">Activity</th>
-          <th style="padding:8px;text-align:left">Date</th>
-          <th style="padding:8px;text-align:left">Time</th>
-          <th style="padding:8px;text-align:left">Guests</th>
-          <th style="padding:8px;text-align:right">Amount</th>
+  <!-- Reference -->
+  <div style="background:#f0fdf4;border-bottom:1px solid #dcfce7;padding:20px 32px;text-align:center;">
+    <p style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin:0 0 8px;">
+      Booking Reference
+    </p>
+    <p style="font-size:30px;font-weight:800;color:#16a34a;letter-spacing:0.12em;
+              font-family:'Courier New',monospace;margin:0 0 6px;">
+      {booking.reference}
+    </p>
+    <p style="font-size:12px;color:#6b7280;margin:0;">Show this code at the venue entrance</p>
+  </div>
+
+  <!-- Body -->
+  <div style="padding:28px 32px;">
+
+    <p style="font-size:15px;color:#1a1a1a;margin:0 0 20px;">
+      Hi <strong style="color:#16a34a;">{booking.customer_name}</strong>,<br>
+      Your booking is confirmed and your 50% advance payment has been received.
+      See you soon!
+    </p>
+
+    <!-- Activities table -->
+    <p style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;
+              color:#9ca3af;margin:0 0 12px;">Activities Booked</p>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:24px;">
+      <thead>
+        <tr style="background:#f9fafb;">
+          <th style="padding:9px 12px;text-align:left;font-size:11px;color:#6b7280;font-weight:600;">Activity</th>
+          <th style="padding:9px 12px;text-align:left;font-size:11px;color:#6b7280;font-weight:600;">Date</th>
+          <th style="padding:9px 12px;text-align:left;font-size:11px;color:#6b7280;font-weight:600;">Time</th>
+          <th style="padding:9px 12px;text-align:left;font-size:11px;color:#6b7280;font-weight:600;">Guests</th>
+          <th style="padding:9px 12px;text-align:right;font-size:11px;color:#6b7280;font-weight:600;">Amount</th>
         </tr>
-        {customer_rows}
-        <tr style="background:#f5f5f5;">
-          <td colspan="4" style="padding:8px;font-weight:bold;text-align:right;border:1px solid #ddd;">
-            Total booking value
-          </td>
-          <td style="padding:8px;font-weight:bold;text-align:right;border:1px solid #ddd;">
-            ₹{grand_total:,.0f}
-          </td>
-        </tr>
-      </table>
+      </thead>
+      <tbody>{table_rows_html}</tbody>
+    </table>
 
-      <div style="background:#f0faf4;border:1px solid #b2dfdb;border-radius:8px;padding:16px;margin:16px 0;">
-        <p style="margin:0 0 10px;font-weight:bold;color:#2d7a4f;">Payment Summary</p>
-        <table style="width:100%;border-collapse:collapse;">
-          <tr>
-            <td style="padding:5px 0;color:#444;">✅ Paid online (50%)</td>
-            <td style="padding:5px 0;text-align:right;font-weight:bold;color:#2d7a4f;">
-              ₹{amount_paid:,.0f}
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:5px 0;color:#444;border-top:1px solid #ddd;">
-              ⏳ Balance due at arrival (50%)
-            </td>
-            <td style="padding:5px 0;text-align:right;font-weight:bold;color:#e65100;border-top:1px solid #ddd;">
-              ₹{balance_due:,.0f}
-            </td>
-          </tr>
-        </table>
+    <!-- Payment summary -->
+    <p style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;
+              color:#9ca3af;margin:0 0 12px;">Payment Summary</p>
+    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:12px;padding:16px 20px;margin-bottom:16px;">
+      <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:14px;">
+        <span style="color:#6b7280;">Total booking value</span>
+        <span style="font-weight:600;color:#1a1a1a;">₹{grand_total:,.0f}</span>
       </div>
-
-      <div style="background:#fff3e0;border-left:4px solid #e65100;padding:10px 14px;
-                  border-radius:4px;margin-bottom:16px;">
-        <p style="margin:0;color:#444;font-size:13px;">
-          Please carry <strong>₹{balance_due:,.0f}</strong> in cash to pay at the venue on arrival.
-        </p>
+      <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:14px;
+                  border-top:1px solid #e5e7eb;margin-top:4px;">
+        <span style="color:#6b7280;">✅ Paid online (50% advance)</span>
+        <span style="font-weight:700;color:#16a34a;">₹{amount_paid:,.0f}</span>
       </div>
+      <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:14px;">
+        <span style="color:#6b7280;">⏳ Balance due at arrival (50%)</span>
+        <span style="font-weight:700;color:#d97706;">₹{balance_due:,.0f}</span>
+      </div>
+    </div>
 
-      <p>📍 Nedungolam, Paravur, Kollam, Kerala 691334</p>
-      <p>📞 9496141619</p>
-      <p style="color:#888;font-size:12px;">
-        Questions? Reply to this email or contact us at mangrovespot.care@gmail.com
+    <!-- Balance reminder -->
+    <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;
+                padding:12px 16px;margin-bottom:24px;">
+      <p style="margin:0;color:#92400e;font-size:13px;">
+        🏕&nbsp; Please carry <strong>₹{balance_due:,.0f}</strong> in cash or UPI
+        to pay at the venue on arrival.
       </p>
     </div>
-    """
 
-    _send_email(
-        booking.customer_email,
-        f"Booking Confirmed — {booking.reference}",
-        customer_html,
-    )
-    logger.info("Confirmation email sent to %s for booking %s", booking.customer_email, booking.reference)
+    <!-- Venue info -->
+    <div style="border-top:1px solid #f3f4f6;padding-top:16px;font-size:13px;color:#6b7280;line-height:1.8;">
+      <p style="margin:0;">📍 Nedungolam, Paravur, Kollam, Kerala 691334</p>
+      <p style="margin:0;">📞 9496141619</p>
+      <p style="margin:0;">✉️ mangrovespot.care@gmail.com</p>
+    </div>
 
-    # ── 2. Owner alert email ──────────────────────────────────────
-    admin_url = f"{settings.FRONTEND_URL}/admin/bookings/{booking.id}"
-
-    owner_html = f"""
-    <div style="font-family:Arial,sans-serif;padding:20px;max-width:600px;">
-      <h2 style="color:#2d7a4f;">🔔 New Booking — {booking.reference}</h2>
-
-      <table style="border-collapse:collapse;width:100%;margin-bottom:16px;">
-        <tr><td style="padding:5px;color:#555;width:140px;">Customer</td>
-            <td style="padding:5px;font-weight:bold;">{booking.customer_name}</td></tr>
-        <tr><td style="padding:5px;color:#555;">Phone</td>
-            <td style="padding:5px;">{booking.customer_phone}</td></tr>
-        <tr><td style="padding:5px;color:#555;">Email</td>
-            <td style="padding:5px;">{booking.customer_email}</td></tr>
-        <tr><td style="padding:5px;color:#555;">Amount paid</td>
-            <td style="padding:5px;color:#2d7a4f;font-weight:bold;">₹{amount_paid:,.0f}</td></tr>
-        <tr><td style="padding:5px;color:#555;">Balance at arrival</td>
-            <td style="padding:5px;color:#e65100;font-weight:bold;">₹{balance_due:,.0f}</td></tr>
-        <tr><td style="padding:5px;color:#555;">Grand total</td>
-            <td style="padding:5px;font-weight:bold;">₹{grand_total:,.0f}</td></tr>
-      </table>
-
-      <table style="border-collapse:collapse;width:100%;margin:12px 0;">
-        <tr style="background:#2d7a4f;color:white;">
-          <th style="padding:6px;text-align:left">Activity</th>
-          <th style="padding:6px;text-align:left">Date</th>
-          <th style="padding:6px;text-align:left">Time</th>
-          <th style="padding:6px;text-align:left">Guests</th>
-          <th style="padding:6px;text-align:right">Amount</th>
-        </tr>
-        {owner_rows}
-      </table>
-
-      <a href="{admin_url}"
-         style="display:inline-block;background:#2d7a4f;color:white;padding:10px 20px;
-                text-decoration:none;border-radius:6px;margin-top:8px;">
-        View in Admin Panel →
+    <!-- CTA -->
+    <div style="text-align:center;margin-top:24px;">
+      <a href="{frontend_url}/my-bookings"
+         style="display:inline-block;background:#16a34a;color:#fff;text-decoration:none;
+                font-weight:700;font-size:14px;padding:14px 32px;border-radius:10px;">
+        View My Booking →
       </a>
     </div>
-    """
 
-    owner_email = getattr(settings, 'ADMIN_EMAIL', settings.EMAIL_HOST_USER)
-    _send_email(
-        owner_email,
-        f"New Booking: {booking.reference} — ₹{grand_total:,.0f}",
-        owner_html,
-    )
-    logger.info("Owner alert sent for booking %s", booking.reference)
+  </div><!-- /body -->
 
+  <!-- Footer -->
+  <div style="padding:16px 32px;border-top:1px solid #f3f4f6;text-align:center;">
+    <p style="font-size:11px;color:#9ca3af;margin:0;">
+      This confirmation was sent to {booking.customer_email}.<br>
+      <strong>MangroveSpot Adventures</strong> · Paravur, Kerala, India
+    </p>
+  </div>
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Keep the old task name working so nothing else breaks.
-# It just calls the new combined task.
-# ─────────────────────────────────────────────────────────────────────────────
-@shared_task
-def send_booking_confirmation_email(booking_id: int):
-    """Backward-compat alias → delegates to send_confirmation_emails."""
-    send_confirmation_emails(booking_id)
+</div><!-- /card -->
+</div><!-- /wrapper -->
+</body>
+</html>"""
 
-
-@shared_task
-def send_owner_new_booking_alert(booking_id: int):
-    """Backward-compat alias → no-op now, owner alert is in send_confirmation_emails."""
-    pass
-
-
-@shared_task
-def send_cancellation_email(booking_id: int):
-    """Cancellation email to customer."""
-    from apps.bookings.models import Booking
     try:
-        booking = Booking.objects.get(id=booking_id)
+        _send(
+            to      = booking.customer_email,
+            subject = f"Booking Confirmed — {booking.reference} | MangroveSpot Adventures",
+            html    = customer_html,
+        )
+        logger.info(
+            "Customer confirmation email sent to %s for booking %s",
+            booking.customer_email, booking.reference,
+        )
+    except Exception as exc:
+        # Retry the whole task — both emails will resend on retry.
+        # That's fine because customers don't mind getting two confirmations;
+        # they mind NOT getting one.
+        retry_num = self.request.retries
+        countdown = 10 * (2 ** retry_num)   # 10s, 20s, 40s, 80s, 160s
+        logger.warning(
+            "send_confirmation_emails: customer email attempt %d failed "
+            "for booking %s — retrying in %ds. Error: %s",
+            retry_num + 1, booking.reference, countdown, exc,
+        )
+        raise self.retry(exc=exc, countdown=countdown)
+
+    # ── 2. Owner/admin alert email ────────────────────────────────
+    admin_rows_html = ""
+    for item in items:
+        admin_rows_html += f"""
+        <tr>
+          <td style="padding:7px 10px;border-bottom:1px solid #f0f0f0;">{item.activity.name}</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #f0f0f0;">{item.visit_date}</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #f0f0f0;">{_slot_label(item)}</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #f0f0f0;">{_guests_label(item)}</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600;">
+            ₹{float(item.price_snapshot):,.0f}
+          </td>
+        </tr>"""
+
+    admin_panel_url = f"{frontend_url}/admin/bookings/{booking.pk}"
+
+    owner_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"/><title>New Booking — {booking.reference}</title></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+             background:#f4f7f6;margin:0;padding:0;">
+<div style="max-width:600px;margin:24px auto;padding:0 16px;">
+<div style="background:#fff;border-radius:16px;padding:28px 32px;
+            box-shadow:0 2px 12px rgba(0,0,0,0.08);">
+
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;">
+    <div style="background:#16a34a;border-radius:10px;padding:10px;font-size:20px;">🔔</div>
+    <div>
+      <h2 style="margin:0;font-size:18px;color:#1a1a1a;">New Confirmed Booking</h2>
+      <p style="margin:0;font-size:13px;color:#6b7280;">Reference: <strong>{booking.reference}</strong></p>
+    </div>
+  </div>
+
+  <!-- Customer details -->
+  <table style="width:100%;border-collapse:collapse;margin-bottom:20px;
+                background:#f9fafb;border-radius:10px;overflow:hidden;">
+    <tr>
+      <td style="padding:9px 14px;color:#6b7280;font-size:13px;width:130px;">Customer</td>
+      <td style="padding:9px 14px;font-weight:600;font-size:13px;">{booking.customer_name}</td>
+    </tr>
+    <tr>
+      <td style="padding:9px 14px;color:#6b7280;font-size:13px;">Phone</td>
+      <td style="padding:9px 14px;font-size:13px;">{booking.customer_phone}</td>
+    </tr>
+    <tr>
+      <td style="padding:9px 14px;color:#6b7280;font-size:13px;">Email</td>
+      <td style="padding:9px 14px;font-size:13px;">{booking.customer_email}</td>
+    </tr>
+    <tr>
+      <td style="padding:9px 14px;color:#6b7280;font-size:13px;">Paid now</td>
+      <td style="padding:9px 14px;font-weight:700;color:#16a34a;font-size:14px;">
+        ₹{amount_paid:,.0f}
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:9px 14px;color:#6b7280;font-size:13px;">Balance at arrival</td>
+      <td style="padding:9px 14px;font-weight:700;color:#d97706;font-size:14px;">
+        ₹{balance_due:,.0f}
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:9px 14px;color:#6b7280;font-size:13px;">Grand total</td>
+      <td style="padding:9px 14px;font-weight:700;font-size:14px;">₹{grand_total:,.0f}</td>
+    </tr>
+  </table>
+
+  <!-- Activities -->
+  <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
+    <thead>
+      <tr style="background:#16a34a;color:#fff;">
+        <th style="padding:9px 10px;text-align:left;font-size:12px;">Activity</th>
+        <th style="padding:9px 10px;text-align:left;font-size:12px;">Date</th>
+        <th style="padding:9px 10px;text-align:left;font-size:12px;">Time</th>
+        <th style="padding:9px 10px;text-align:left;font-size:12px;">Guests</th>
+        <th style="padding:9px 10px;text-align:right;font-size:12px;">Amount</th>
+      </tr>
+    </thead>
+    <tbody>{admin_rows_html}</tbody>
+  </table>
+
+  <a href="{admin_panel_url}"
+     style="display:inline-block;background:#16a34a;color:#fff;text-decoration:none;
+            font-weight:700;font-size:13px;padding:12px 24px;border-radius:8px;">
+    Open in Admin Panel →
+  </a>
+
+</div>
+</div>
+</body>
+</html>"""
+
+    try:
+        _send(
+            to      = admin_email,
+            subject = f"[MangroveSpot] New Booking {booking.reference} — ₹{grand_total:,.0f}",
+            html    = owner_html,
+        )
+        logger.info("Owner alert sent for booking %s", booking.reference)
+    except Exception as exc:
+        # Don't retry the whole task for the admin email — customer already got theirs.
+        # Just log it. Admin can check the dashboard.
+        logger.error(
+            "Owner alert failed for booking %s (customer email already sent): %s",
+            booking.reference, exc,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────
+# CANCELLATION EMAIL
+# ─────────────────────────────────────────────────────────────────
+
+@shared_task(
+    bind                  = True,
+    acks_late             = True,
+    reject_on_worker_lost = True,
+    max_retries           = 4,
+    name                  = "notifications.send_cancellation_email",
+)
+def send_cancellation_email(self, booking_id: int):
+    """Customer cancellation notification with retry."""
+    from apps.bookings.models import Booking
+
+    try:
+        booking = Booking.objects.get(pk=booking_id)
     except Booking.DoesNotExist:
         logger.error("send_cancellation_email: booking %s not found", booking_id)
         return
 
-    html = f"""
-    <div style="font-family:Arial,sans-serif;padding:20px;">
-      <h2 style="color:#d9534f;">Booking Cancelled — {booking.reference}</h2>
-      <p>Hi {booking.customer_name},</p>
-      <p>Your booking <strong>{booking.reference}</strong> has been cancelled.</p>
-      <p>Refund of <strong>₹{float(booking.amount_paid):,.0f}</strong>
-         will be processed in 3–5 business days.</p>
-      <p>📞 9496141619 | mangrovespot.care@gmail.com</p>
+    frontend_url = getattr(settings, "FRONTEND_URL", "https://mangrovespot.in")
+    admin_email  = getattr(settings, "ADMIN_EMAIL", settings.DEFAULT_FROM_EMAIL)
+    amount_paid  = float(booking.amount_paid)
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"/></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+             background:#f4f7f6;margin:0;padding:0;">
+<div style="max-width:600px;margin:24px auto;padding:0 16px;">
+<div style="background:#fff;border-radius:16px;overflow:hidden;
+            box-shadow:0 2px 12px rgba(0,0,0,0.08);">
+  <div style="background:#dc2626;padding:28px 32px;text-align:center;">
+    <div style="font-size:36px;margin-bottom:10px;">❌</div>
+    <h2 style="color:#fff;margin:0;font-size:20px;">Booking Cancelled</h2>
+  </div>
+  <div style="padding:28px 32px;">
+    <p style="font-size:13px;color:#6b7280;margin:0 0 4px;">Booking Reference</p>
+    <p style="font-size:22px;font-weight:700;color:#dc2626;font-family:monospace;
+              letter-spacing:0.1em;margin:0 0 20px;">{booking.reference}</p>
+    <p style="font-size:15px;color:#1a1a1a;">
+      Hi {booking.customer_name},<br><br>
+      Your booking has been cancelled. If a refund is applicable, it will be
+      processed to your original payment method within 5–7 business days.
+    </p>
+    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;
+                padding:14px 18px;margin-top:16px;font-size:13px;color:#6b7280;">
+      Questions? Contact us at
+      <a href="mailto:{admin_email}" style="color:#16a34a;">{admin_email}</a>
+      or call 9496141619.
     </div>
-    """
-    _send_email(
-        booking.customer_email,
-        f"Booking Cancelled — {booking.reference}",
-        html,
-    )
+    <div style="text-align:center;margin-top:20px;">
+      <a href="{frontend_url}"
+         style="display:inline-block;background:#16a34a;color:#fff;text-decoration:none;
+                font-weight:700;font-size:13px;padding:12px 24px;border-radius:8px;">
+        Book Again →
+      </a>
+    </div>
+  </div>
+</div>
+</div>
+</body>
+</html>"""
+
+    try:
+        _send(
+            to      = booking.customer_email,
+            subject = f"Booking Cancelled — {booking.reference} | MangroveSpot",
+            html    = html,
+        )
+        logger.info(
+            "Cancellation email sent to %s for booking %s",
+            booking.customer_email, booking.reference,
+        )
+    except Exception as exc:
+        countdown = 10 * (2 ** self.request.retries)
+        logger.warning(
+            "send_cancellation_email: attempt %d failed for booking %s "
+            "— retrying in %ds. Error: %s",
+            self.request.retries + 1, booking_id, countdown, exc,
+        )
+        raise self.retry(exc=exc, countdown=countdown)
 
 
-@shared_task
+# ─────────────────────────────────────────────────────────────────
+# BACKWARD-COMPAT ALIASES
+# Any existing code that calls these names still works.
+# ─────────────────────────────────────────────────────────────────
+
+@shared_task(name="notifications.send_booking_confirmation_email")
+def send_booking_confirmation_email(booking_id: int):
+    """Alias → delegates to send_confirmation_emails."""
+    send_confirmation_emails(booking_id)
+
+
+@shared_task(name="notifications.send_admin_booking_notification")
+def send_admin_booking_notification(booking_id: int):
+    """Alias → no-op (now handled inside send_confirmation_emails)."""
+    pass
+
+
+# ─────────────────────────────────────────────────────────────────
+# PERIODIC TASKS (Celery Beat)
+# ─────────────────────────────────────────────────────────────────
+
+@shared_task(name="notifications.release_expired_slot_holds")
 def release_expired_slot_holds():
-    """Celery Beat — every 5 minutes. Expires pending bookings past hold window."""
+    """Every 5 minutes via Celery Beat. Expires pending bookings past hold window."""
     from apps.bookings.models import Booking
     from django.utils import timezone
+
     expired = Booking.objects.filter(
-        status='pending',
+        status="pending",
         items__slot_hold_expires__lt=timezone.now(),
     ).distinct()
     count = expired.count()
-    expired.update(status='expired')
+    expired.update(status="expired")
     logger.info("Released %d expired slot holds", count)
     return count
 
 
-@shared_task
+@shared_task(name="notifications.send_24hr_reminders")
 def send_24hr_reminders():
-    """Celery Beat — daily at 8 PM IST. Reminder emails for tomorrow's bookings."""
+    """Daily at 8 PM IST via Celery Beat. Reminder for tomorrow's bookings."""
     from apps.bookings.models import BookingItem
     from datetime import date, timedelta
+
     tomorrow = date.today() + timedelta(days=1)
     items = BookingItem.objects.filter(
         visit_date=tomorrow,
-        booking__status='confirmed',
-    ).select_related('booking', 'activity', 'slot')
+        booking__status="confirmed",
+    ).select_related("booking", "activity", "slot")
 
     for item in items:
-        time_str = _time_label(item)
+        time_str = _slot_label(item)
         html = f"""
         <div style="font-family:Arial,sans-serif;padding:20px;">
-          <h2 style="color:#2d7a4f;">⏰ Reminder — Tomorrow at MangroveSpot</h2>
+          <h2 style="color:#16a34a;">⏰ See You Tomorrow at MangroveSpot!</h2>
           <p>Hi {item.booking.customer_name},</p>
-          <p>Reminder: <strong>{item.activity.name}</strong> tomorrow at <strong>{time_str}</strong></p>
+          <p>Reminder: <strong>{item.activity.name}</strong>
+             tomorrow at <strong>{time_str}</strong></p>
           <p>📍 Nedungolam, Paravur, Kollam, Kerala</p>
-          <p>Bring: comfortable clothes, water, sunscreen.</p>
+          <p>Please bring comfortable clothes, water, and sunscreen.
+             Carry <strong>₹{float(item.booking.balance_due):,.0f}</strong>
+             to pay the remaining balance at the venue.</p>
           <p>📞 9496141619</p>
-        </div>
-        """
-        _send_email(
-            item.booking.customer_email,
-            f"Reminder: {item.activity.name} tomorrow!",
-            html,
-        )
+        </div>"""
+        try:
+            _send(
+                to      = item.booking.customer_email,
+                subject = f"See You Tomorrow — {item.activity.name} at MangroveSpot!",
+                html    = html,
+            )
+        except Exception as exc:
+            logger.error(
+                "24h reminder failed for booking %s: %s",
+                item.booking.reference, exc,
+            )

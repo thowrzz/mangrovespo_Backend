@@ -214,17 +214,17 @@ import os
 # CELERY_TIMEZONE = 'Asia/Kolkata'
 # CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 
-
 from pathlib import Path
 from decouple import config, Csv
 import dj_database_url
 from datetime import timedelta
+import os
 
 
 # ── Base ──────────────────────────────────────────────────────────
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR   = Path(__file__).resolve().parent.parent
 SECRET_KEY = config('SECRET_KEY')
-DEBUG = config('DEBUG', default=False, cast=bool)
+DEBUG      = config('DEBUG', default=False, cast=bool)
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', cast=Csv())
 
 GOOGLE_OAUTH_CLIENT_ID = config('GOOGLE_OAUTH_CLIENT_ID', default='')
@@ -242,7 +242,6 @@ DJANGO_APPS = [
 
 THIRD_PARTY_APPS = [
     'rest_framework',
-    # 'rest_framework.authtoken',  # removed — not used (DRF Token count was 0)
     'rest_framework_simplejwt',
     'corsheaders',
     'django_filters',
@@ -266,7 +265,7 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
 # ── Middleware ────────────────────────────────────────────────────
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',          # must be first
+    'corsheaders.middleware.CorsMiddleware',           # must be first
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -297,8 +296,7 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
-# Celery
-CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
 # ── Email ─────────────────────────────────────────────────────────
 EMAIL_BACKEND       = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST          = 'smtp.gmail.com'
@@ -336,15 +334,15 @@ USE_TZ        = True
 
 
 # ── Static & Media ────────────────────────────────────────────────
-STATIC_URL         = '/static/'
-STATIC_ROOT        = BASE_DIR / 'staticfiles'
+STATIC_URL          = '/static/'
+STATIC_ROOT         = BASE_DIR / 'staticfiles'
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
 # ── CORS ──────────────────────────────────────────────────────────
-CORS_ALLOWED_ORIGINS  = config('CORS_ALLOWED_ORIGINS', cast=Csv())
+CORS_ALLOWED_ORIGINS   = config('CORS_ALLOWED_ORIGINS', cast=Csv())
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = [
     'accept',
@@ -360,26 +358,11 @@ CORS_ALLOW_HEADERS = [
 
 
 # ── Django REST Framework ─────────────────────────────────────────
-#
-# Authentication order matters:
-#   1. CustomerJWTAuthentication — handles customer Bearer tokens (custom HMAC JWT)
-#      Returns (CustomerPrincipal, token) for valid customer tokens.
-#      Returns None for non-customer tokens (lets next class try).
-#
-#   2. JWTAuthentication — handles admin SimpleJWT tokens.
-#      Only runs if CustomerJWTAuthentication returned None.
-#
-# This ordering ensures customer tokens are NEVER handed to SimpleJWT,
-# which would reject them and raise AuthenticationFailed.
-#
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'customer_auth.authentication.CustomerJWTAuthentication',
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
-    # IsAuthenticated (not IsAuthenticatedOrReadOnly) as default so that
-    # unauthenticated GETs don't silently skip authentication.
-    # Public views explicitly set permission_classes = [AllowAny].
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
@@ -403,8 +386,9 @@ SIMPLE_JWT = {
 
 
 # ── Razorpay ──────────────────────────────────────────────────────
-RAZORPAY_KEY_ID     = config('RAZORPAY_KEY_ID')
-RAZORPAY_KEY_SECRET = config('RAZORPAY_KEY_SECRET')
+RAZORPAY_KEY_ID        = config('RAZORPAY_KEY_ID')
+RAZORPAY_KEY_SECRET    = config('RAZORPAY_KEY_SECRET')
+RAZORPAY_WEBHOOK_SECRET = config('RAZORPAY_WEBHOOK_SECRET', default='')
 
 
 # ── Cloudinary ────────────────────────────────────────────────────
@@ -423,7 +407,6 @@ cloudinary.config(
     secure     = True,
 )
 
-RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '')
 
 # ── App Settings ──────────────────────────────────────────────────
 ADMIN_EMAIL              = config('ADMIN_EMAIL', default='mangrovespot.care@gmail.com')
@@ -433,7 +416,37 @@ BOOKING_REFERENCE_PREFIX = 'MS'
 
 
 # ── Celery ────────────────────────────────────────────────────────
-CELERY_BROKER_URL      = config('REDIS_URL', default='redis://localhost:6379/0')
-CELERY_RESULT_BACKEND  = config('REDIS_URL', default='redis://localhost:6379/0')
-CELERY_TIMEZONE        = 'Asia/Kolkata'
-CELERY_BEAT_SCHEDULER  = 'django_celery_beat.schedulers:DatabaseScheduler'
+CELERY_BROKER_URL                      = config('REDIS_URL', default='redis://localhost:6379/0')
+CELERY_RESULT_BACKEND                  = config('REDIS_URL', default='redis://localhost:6379/0')
+CELERY_TIMEZONE                        = 'Asia/Kolkata'
+CELERY_BEAT_SCHEDULER                  = 'django_celery_beat.schedulers:DatabaseScheduler'
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
+# ── Celery reliability — required for guaranteed email delivery ───
+#
+# CELERY_TASK_ACKS_LATE
+#   Task is NOT removed from Redis until it finishes successfully.
+#   If the worker crashes mid-send, the task requeues automatically.
+#   Without this, a crashed worker silently drops the task forever.
+#
+# CELERY_TASK_REJECT_ON_WORKER_LOST
+#   If the worker process is killed (OOM, deploy restart), the task
+#   is requeued instead of discarded. Works with acks_late=True.
+#
+CELERY_TASK_ACKS_LATE               = True
+CELERY_TASK_REJECT_ON_WORKER_LOST   = True
+CELERY_TASK_SERIALIZER              = 'json'
+CELERY_RESULT_SERIALIZER            = 'json'
+CELERY_ACCEPT_CONTENT               = ['json']
+
+# ── Email tasks on a dedicated queue ─────────────────────────────
+# A slow/failing SMTP server never backs up the main queue.
+# Run the email worker separately:
+#   celery -A config worker -l info -Q emails --concurrency=4
+CELERY_TASK_ROUTES = {
+    'notifications.send_confirmation_emails':        {'queue': 'emails'},
+    'notifications.send_cancellation_email':         {'queue': 'emails'},
+    'notifications.send_booking_confirmation_email': {'queue': 'emails'},
+    'notifications.send_admin_booking_notification': {'queue': 'emails'},
+    'notifications.send_24hr_reminders':             {'queue': 'emails'},
+}
