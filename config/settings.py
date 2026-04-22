@@ -297,7 +297,8 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
-
+# Celery
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 # ── Email ─────────────────────────────────────────────────────────
 EMAIL_BACKEND       = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST          = 'smtp.gmail.com'
