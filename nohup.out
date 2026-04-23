@@ -1,0 +1,164 @@
+/var/www/mangrovespot/backend/venv/lib/python3.10/site-packages/celery/platforms.py:829: SecurityWarning: You're running the worker with superuser privileges: this is
+absolutely not recommended!
+
+Please specify a different user using the --uid option.
+
+User information: uid=0 euid=0 gid=0 egid=0
+
+  warnings.warn(SecurityWarning(ROOT_DISCOURAGED.format(
+ 
+ -------------- celery@srv1172539 v5.4.0 (opalescent)
+--- ***** ----- 
+-- ******* ---- Linux-5.15.0-173-generic-x86_64-with-glibc2.35 2026-04-23 08:06:29
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         mangrovespot:0x7f7b8a47cca0
+- ** ---------- .> transport:   redis://localhost:6379/0
+- ** ---------- .> results:     redis://localhost:6379/0
+- *** --- * --- .> concurrency: 2 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> celery           exchange=celery(direct) key=celery
+                
+
+[tasks]
+  . apps.notifications.tasks.release_expired_slot_holds
+  . apps.notifications.tasks.send_24hr_reminders
+  . apps.notifications.tasks.send_booking_confirmation_email
+  . apps.notifications.tasks.send_cancellation_email
+  . apps.notifications.tasks.send_confirmation_emails
+  . apps.notifications.tasks.send_owner_new_booking_alert
+
+/var/www/mangrovespot/backend/venv/lib/python3.10/site-packages/celery/platforms.py:829: SecurityWarning: You're running the worker with superuser privileges: this is
+absolutely not recommended!
+
+Please specify a different user using the --uid option.
+
+User information: uid=0 euid=0 gid=0 egid=0
+
+  warnings.warn(SecurityWarning(ROOT_DISCOURAGED.format(
+ 
+ -------------- celery@srv1172539 v5.4.0 (opalescent)
+--- ***** ----- 
+-- ******* ---- Linux-5.15.0-173-generic-x86_64-with-glibc2.35 2026-04-23 08:13:21
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         mangrovespot:0x7f6845418c70
+- ** ---------- .> transport:   redis://localhost:6379/0
+- ** ---------- .> results:     redis://localhost:6379/0
+- *** --- * --- .> concurrency: 2 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> celery           exchange=celery(direct) key=celery
+                
+
+[tasks]
+  . notifications.release_expired_slot_holds
+  . notifications.send_24hr_reminders
+  . notifications.send_booking_confirmation_email
+  . notifications.send_cancellation_email
+  . notifications.send_confirmation_emails
+  . notifications.send_owner_new_booking_alert
+
+
+Restarting celery worker (/var/www/mangrovespot/backend/venv/bin/celery -A config worker --loglevel=info --logfile=/var/log/mangrovespot/celery.log)
+
+Restarting celery worker (/var/www/mangrovespot/backend/venv/bin/celery -A config worker --loglevel=info --logfile=/var/log/mangrovespot/celery.log)
+/var/www/mangrovespot/backend/venv/lib/python3.10/site-packages/celery/platforms.py:829: SecurityWarning: You're running the worker with superuser privileges: this is
+absolutely not recommended!
+
+Please specify a different user using the --uid option.
+
+User information: uid=0 euid=0 gid=0 egid=0
+
+  warnings.warn(SecurityWarning(ROOT_DISCOURAGED.format(
+ 
+ -------------- celery@srv1172539 v5.4.0 (opalescent)
+--- ***** ----- 
+-- ******* ---- Linux-5.15.0-173-generic-x86_64-with-glibc2.35 2026-04-23 08:17:30
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         mangrovespot:0x7f456f9dc730
+- ** ---------- .> transport:   redis://localhost:6379/0
+- ** ---------- .> results:     redis://localhost:6379/0
+- *** --- * --- .> concurrency: 2 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> celery           exchange=celery(direct) key=celery
+                
+
+[tasks]
+  . notifications.release_expired_slot_holds
+  . notifications.send_24hr_reminders
+  . notifications.send_booking_confirmation_email
+  . notifications.send_cancellation_email
+  . notifications.send_confirmation_emails
+  . notifications.send_owner_new_booking_alert
+
+/var/www/mangrovespot/backend/venv/lib/python3.10/site-packages/celery/platforms.py:829: SecurityWarning: You're running the worker with superuser privileges: this is
+absolutely not recommended!
+
+Please specify a different user using the --uid option.
+
+User information: uid=0 euid=0 gid=0 egid=0
+
+  warnings.warn(SecurityWarning(ROOT_DISCOURAGED.format(
+ 
+ -------------- celery@srv1172539 v5.4.0 (opalescent)
+--- ***** ----- 
+-- ******* ---- Linux-5.15.0-173-generic-x86_64-with-glibc2.35 2026-04-23 08:17:31
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         mangrovespot:0x7fc945290760
+- ** ---------- .> transport:   redis://localhost:6379/0
+- ** ---------- .> results:     redis://localhost:6379/0
+- *** --- * --- .> concurrency: 2 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> celery           exchange=celery(direct) key=celery
+                
+
+[tasks]
+  . notifications.release_expired_slot_holds
+  . notifications.send_24hr_reminders
+  . notifications.send_booking_confirmation_email
+  . notifications.send_cancellation_email
+  . notifications.send_confirmation_emails
+  . notifications.send_owner_new_booking_alert
+
+/var/www/mangrovespot/backend/venv/lib/python3.10/site-packages/celery/platforms.py:829: SecurityWarning: You're running the worker with superuser privileges: this is
+absolutely not recommended!
+
+Please specify a different user using the --uid option.
+
+User information: uid=0 euid=0 gid=0 egid=0
+
+  warnings.warn(SecurityWarning(ROOT_DISCOURAGED.format(
+ 
+ -------------- worker1@srv1172539 v5.4.0 (opalescent)
+--- ***** ----- 
+-- ******* ---- Linux-5.15.0-173-generic-x86_64-with-glibc2.35 2026-04-23 08:29:57
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         mangrovespot:0x7f491f0c4c40
+- ** ---------- .> transport:   redis://localhost:6379/0
+- ** ---------- .> results:     redis://localhost:6379/0
+- *** --- * --- .> concurrency: 2 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> celery           exchange=celery(direct) key=celery
+                
+
+[tasks]
+  . notifications.release_expired_slot_holds
+  . notifications.send_24hr_reminders
+  . notifications.send_booking_confirmation_email
+  . notifications.send_cancellation_email
+  . notifications.send_confirmation_emails
+  . notifications.send_owner_new_booking_alert
+

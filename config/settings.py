@@ -437,3 +437,17 @@ CELERY_ACCEPT_CONTENT               = ['json']
 # A slow/failing SMTP server never backs up the main queue.
 # Run the email worker separately:
 #   celery -A config worker -l info -Q emails --concurrency=4
+# ── Logging ───────────────────────────────────────────────────────
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+}
