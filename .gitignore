@@ -20,4 +20,5 @@ env/
 
 # OS
 .DS_Store
-Thumbs.db
+Thumbs.dbnohup.out
+hell
