@@ -416,28 +416,22 @@ BOOKING_REFERENCE_PREFIX = 'MS'
 
 
 # ── Celery ────────────────────────────────────────────────────────
+# ── Celery ────────────────────────────────────────────────────────
 CELERY_BROKER_URL                      = config('REDIS_URL', default='redis://localhost:6379/0')
 CELERY_RESULT_BACKEND                  = config('REDIS_URL', default='redis://localhost:6379/0')
 CELERY_TIMEZONE                        = 'Asia/Kolkata'
 CELERY_BEAT_SCHEDULER                  = 'django_celery_beat.schedulers:DatabaseScheduler'
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
-# ── Celery reliability — required for guaranteed email delivery ───
-#
-# CELERY_TASK_ACKS_LATE
-#   Task is NOT removed from Redis until it finishes successfully.
-#   If the worker crashes mid-send, the task requeues automatically.
-#   Without this, a crashed worker silently drops the task forever.
-#
-# CELERY_TASK_REJECT_ON_WORKER_LOST
-#   If the worker process is killed (OOM, deploy restart), the task
-#   is requeued instead of discarded. Works with acks_late=True.
-#
 CELERY_TASK_ACKS_LATE               = True
 CELERY_TASK_REJECT_ON_WORKER_LOST   = True
 CELERY_TASK_SERIALIZER              = 'json'
 CELERY_RESULT_SERIALIZER            = 'json'
 CELERY_ACCEPT_CONTENT               = ['json']
+
+# ── REMOVED CELERY_TASK_ROUTES ────────────────────────────────────
+# Tasks now go to the default queue, handled by the single worker.
+# If you want queue isolation later, run a second worker with -Q emails
 
 # ── Email tasks on a dedicated queue ─────────────────────────────
 # A slow/failing SMTP server never backs up the main queue.
