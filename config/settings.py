@@ -437,10 +437,3 @@ CELERY_ACCEPT_CONTENT               = ['json']
 # A slow/failing SMTP server never backs up the main queue.
 # Run the email worker separately:
 #   celery -A config worker -l info -Q emails --concurrency=4
-CELERY_TASK_ROUTES = {
-    'notifications.send_confirmation_emails':        {'queue': 'emails'},
-    'notifications.send_cancellation_email':         {'queue': 'emails'},
-    'notifications.send_booking_confirmation_email': {'queue': 'emails'},
-    'notifications.send_admin_booking_notification': {'queue': 'emails'},
-    'notifications.send_24hr_reminders':             {'queue': 'emails'},
-}
